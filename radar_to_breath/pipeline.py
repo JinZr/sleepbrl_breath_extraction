@@ -213,7 +213,7 @@ def process_edf(
             "respiratory_rate_artifact_fraction": rate.artifact_fraction,
             "annotation_summary_json": np.asarray(json.dumps(annotation_summary, sort_keys=True)),
             "processing_config_json": np.asarray(cfg.to_json()),
-            "method": np.asarray("windowed quality-weighted fusion of unwrapped I/Q phase"),
+            "method": np.asarray("windowed quality-weighted fusion of locally stronger direct I-or-Q components"),
             "ground_truth_status": np.asarray(
                 "candidate respiratory waveform; no synchronized respiration/airflow ground truth in public SleepBRL files"
             ),

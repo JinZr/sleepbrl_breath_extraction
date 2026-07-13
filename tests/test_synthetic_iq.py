@@ -5,6 +5,7 @@ from scipy import signal
 
 from radar_to_breath.config import ProcessingConfig
 from radar_to_breath.processing import (
+    _select_direct_iq_component,
     fuse_pair_candidates,
     process_iq_pair,
     repair_fused_waveform,
@@ -89,6 +90,32 @@ def test_recovers_known_synthetic_breathing_frequency() -> None:
     valid = rates.rate_bpm[rates.valid]
     assert valid.size >= 6
     assert abs(float(np.median(valid)) - 15.0) < 0.6
+
+
+def test_direct_iq_selection_tracks_locally_stronger_component() -> None:
+    fs = 50.0
+    duration = 360.0
+    rng = np.random.default_rng(42)
+    t = np.arange(int(duration * fs)) / fs
+    breathing = np.sin(2 * np.pi * 0.2 * t)
+    transition = np.clip((t - 150.0) / 60.0, 0.0, 1.0)
+    i_norm = (1.0 - transition) * breathing + 0.04 * rng.standard_normal(t.size)
+    q_norm = -transition * breathing + 0.04 * rng.standard_normal(t.size)
+
+    selected = _select_direct_iq_component(
+        i_norm, q_norm, fs, ProcessingConfig()
+    )
+    sos = signal.bessel(
+        3, [0.1, 0.35], btype="bandpass", fs=fs, output="sos", norm="phase"
+    )
+    selected_resp = signal.sosfiltfilt(sos, selected)
+    expected_resp = signal.sosfiltfilt(sos, breathing)
+    first = t < 120.0
+    last = t >= 240.0
+
+    assert np.corrcoef(selected_resp[first], expected_resp[first])[0, 1] > 0.95
+    assert np.corrcoef(selected_resp[last], expected_resp[last])[0, 1] > 0.95
+    assert np.corrcoef(selected_resp, expected_resp)[0, 1] > 0.90
 
 
 def test_post_fusion_transient_is_marked_and_repaired() -> None:

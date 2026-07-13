@@ -249,6 +249,81 @@ def _downsample_mask(
     return conservative[indices]
 
 
+def _select_direct_iq_component(
+    i_norm: NDArray[np.float64],
+    q_norm: NDArray[np.float64],
+    fs: float,
+    config: ProcessingConfig,
+) -> NDArray[np.float64]:
+    components = np.stack((i_norm, q_norm))
+    resp_sos = signal.bessel(
+        3,
+        [config.respiration_low_hz, config.respiration_high_hz],
+        btype="bandpass",
+        fs=fs,
+        output="sos",
+        norm="phase",
+    )
+    broad_sos = signal.butter(
+        4,
+        [config.broad_low_hz, config.broad_high_hz],
+        btype="bandpass",
+        fs=fs,
+        output="sos",
+    )
+    respiratory = np.stack([_safe_sosfiltfilt(resp_sos, x) for x in components])
+    broad = np.stack([_safe_sosfiltfilt(broad_sos, x) for x in components])
+
+    n = i_norm.size
+    win = max(8, int(round(config.fusion_window_sec * fs)))
+    hop = max(1, int(round(config.fusion_hop_sec * fs)))
+    starts = list(range(0, max(1, n - 1), hop))
+    if not starts or starts[-1] + win < n:
+        starts.append(max(0, n - win))
+    starts = sorted(set(starts))
+
+    accumulator = np.zeros(n, dtype=np.float64)
+    respiratory_accumulator = np.zeros(n, dtype=np.float64)
+    taper_accumulator = np.zeros(n, dtype=np.float64)
+    for start in starts:
+        stop = min(n, start + win)
+        length = stop - start
+        existing = taper_accumulator[start:stop] > 0
+        respiratory_window = respiratory[:, start:stop]
+        scores, _, _ = _window_feature_scores(
+            respiratory_window,
+            broad[:, start:stop],
+            np.ones_like(respiratory_window),
+            np.zeros_like(respiratory_window, dtype=bool),
+            np.ones(2, dtype=np.float64),
+            fs,
+        )
+        signs = np.ones(2, dtype=np.int8)
+        if existing.sum() >= max(8, int(round(10 * fs))):
+            previous = (
+                respiratory_accumulator[start:stop][existing]
+                / taper_accumulator[start:stop][existing]
+            )
+            for component in range(2):
+                current = respiratory_window[component, existing]
+                if np.std(previous) > _EPS and np.std(current) > _EPS:
+                    overlap_corr = float(np.corrcoef(previous, current)[0, 1])
+                    if np.isfinite(overlap_corr):
+                        scores[component] *= 0.8 + 0.2 * abs(overlap_corr)
+                        if overlap_corr < 0:
+                            signs[component] = -1
+        selected = int(np.argmax(scores))
+        sign_value = int(signs[selected])
+        taper = np.maximum(signal.windows.tukey(length, alpha=0.5), 0.05)
+        accumulator[start:stop] += taper * sign_value * components[selected, start:stop]
+        respiratory_accumulator[start:stop] += taper * sign_value * respiratory[selected, start:stop]
+        taper_accumulator[start:stop] += taper
+
+    if np.any(taper_accumulator <= 0):
+        raise RuntimeError("direct I/Q overlap-add left uncovered samples")
+    return accumulator / taper_accumulator
+
+
 def process_iq_pair(
     i_signal: NDArray[np.float64],
     q_signal: NDArray[np.float64],
@@ -262,7 +337,7 @@ def process_iq_pair(
     lsb_q: float,
     config: ProcessingConfig,
 ) -> PairResult:
-    """Convert one I/Q pair into a respiratory-band phase candidate."""
+    """Convert one I/Q pair into a direct respiratory-band candidate."""
 
     if i_signal.shape != q_signal.shape or i_signal.ndim != 1:
         raise ValueError("I and Q must be same-length one-dimensional arrays")
@@ -296,7 +371,7 @@ def process_iq_pair(
     i_norm = i_centered / scale_i
     q_norm = q_centered / scale_q
     radius = np.hypot(i_norm, q_norm)
-    phase = np.unwrap(np.arctan2(q_norm, i_norm)).astype(np.float64)
+    phase = _select_direct_iq_component(i_norm, q_norm, fs, config)
 
     dphase = np.diff(phase, prepend=phase[0])
     dphase_med = float(np.median(dphase))
