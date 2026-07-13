@@ -5,6 +5,8 @@ from scipy import signal
 
 from radar_to_breath.config import ProcessingConfig
 from radar_to_breath.processing import (
+    PairResult,
+    _robust_scale,
     _select_direct_iq_component,
     fuse_pair_candidates,
     process_iq_pair,
@@ -116,6 +118,48 @@ def test_direct_iq_selection_tracks_locally_stronger_component() -> None:
     assert np.corrcoef(selected_resp[first], expected_resp[first])[0, 1] > 0.95
     assert np.corrcoef(selected_resp[last], expected_resp[last])[0, 1] > 0.95
     assert np.corrcoef(selected_resp, expected_resp)[0, 1] > 0.90
+
+
+def test_fusion_preserves_slow_amplitude_contrast_with_fixed_weights() -> None:
+    fs = 4.0
+    duration = 360.0
+    t = np.arange(int(duration * fs)) / fs
+    amplitude = 1.0 + 2.0 * np.clip((t - 120.0) / 120.0, 0.0, 1.0)
+    breath = amplitude * np.sin(2 * np.pi * 0.2 * t)
+    results = []
+    for pair in range(8):
+        artifact_mask = np.full(t.size, pair != 0, dtype=bool)
+        candidate = breath if pair == 0 else np.zeros_like(breath)
+        results.append(
+            PairResult(
+                pair_index=pair,
+                breath=candidate,
+                broad=candidate,
+                phase=candidate,
+                radius=np.ones_like(breath),
+                artifact_mask=artifact_mask,
+                jump_mask=artifact_mask.copy(),
+                motion_mask=artifact_mask.copy(),
+                saturation_mask=artifact_mask.copy(),
+                iq_balance=1.0,
+                artifact_fraction=float(np.mean(artifact_mask)),
+                jump_fraction=0.0,
+                motion_fraction=0.0,
+                saturation_fraction=0.0,
+                center_i_range=0.0,
+                center_q_range=0.0,
+            )
+        )
+
+    fusion = fuse_pair_candidates(results, ProcessingConfig())
+    expected = (breath - np.median(breath)) / _robust_scale(breath)
+    np.testing.assert_allclose(fusion.waveform, expected, atol=1e-12)
+    np.testing.assert_array_equal(fusion.fusion_weights[:, 0], 1.0)
+    np.testing.assert_array_equal(fusion.fusion_weights[:, 1:], 0.0)
+    np.testing.assert_array_equal(fusion.selected_pairs, np.asarray([1]))
+    early = np.std(fusion.waveform[(t >= 20.0) & (t < 80.0)])
+    late = np.std(fusion.waveform[(t >= 280.0) & (t < 340.0)])
+    assert late / early > 2.8
 
 
 def test_post_fusion_transient_is_marked_and_repaired() -> None:

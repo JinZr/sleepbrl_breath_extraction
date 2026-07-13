@@ -668,6 +668,14 @@ def fuse_pair_candidates(
     balances = np.asarray([item.iq_balance for item in pair_results], dtype=np.float64)
     n_pairs, n = candidates.shape
     fs = config.target_fs
+    standardized_candidates = np.zeros_like(candidates)
+    for pair in range(n_pairs):
+        valid = ~artifacts[pair] & np.isfinite(candidates[pair])
+        if valid.sum() < max(8, int(round(10 * fs))):
+            continue
+        x = candidates[pair]
+        med = float(np.median(x[valid]))
+        standardized_candidates[pair] = (x - med) / _robust_scale(x[valid])
     win = max(8, int(round(config.fusion_window_sec * fs)))
     hop = max(1, int(round(config.fusion_hop_sec * fs)))
     starts = list(range(0, max(1, n - 1), hop))
@@ -689,9 +697,10 @@ def fuse_pair_candidates(
         brd = broad[:, start:stop]
         rad = radius[:, start:stop]
         art = artifacts[:, start:stop]
-        scores, corr, standardized = _window_feature_scores(
+        scores, corr, _ = _window_feature_scores(
             cand, brd, rad, art, balances, fs
         )
+        standardized = standardized_candidates[:, start:stop]
         all_scores[wi] = scores.astype(np.float32)
         best = int(np.argmax(scores))
         if scores[best] <= 0:
