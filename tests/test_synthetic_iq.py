@@ -154,8 +154,16 @@ def test_fusion_preserves_slow_amplitude_contrast_with_fixed_weights() -> None:
     fusion = fuse_pair_candidates(results, ProcessingConfig())
     expected = (breath - np.median(breath)) / _robust_scale(breath)
     np.testing.assert_allclose(fusion.waveform, expected, atol=1e-12)
+    np.testing.assert_array_equal(
+        fusion.fusion_signs, np.ones_like(fusion.fusion_signs)
+    )
     np.testing.assert_array_equal(fusion.fusion_weights[:, 0], 1.0)
     np.testing.assert_array_equal(fusion.fusion_weights[:, 1:], 0.0)
+    np.testing.assert_array_equal(
+        fusion.global_fusion_weights, np.asarray([1.0] + [0.0] * 7)
+    )
+    assert fusion.global_quality_scores[0] > 0.0
+    np.testing.assert_array_equal(fusion.global_quality_scores[1:], 0.0)
     np.testing.assert_array_equal(fusion.selected_pairs, np.asarray([1]))
     early = np.std(fusion.waveform[(t >= 20.0) & (t < 80.0)])
     late = np.std(fusion.waveform[(t >= 280.0) & (t < 340.0)])
