@@ -2,7 +2,7 @@
   "target_fs": 4.0,
   "respiration_low_hz": 0.1,
   "respiration_high_hz": 0.35,
-  "iq_lowpass_hz": 0.8,
+  "iq_lowpass_hz": 0.6,
   "broad_low_hz": 0.05,
   "broad_high_hz": 0.8,
   "baseline_window_sec": 300.0,

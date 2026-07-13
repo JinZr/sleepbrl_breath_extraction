@@ -13,7 +13,7 @@ The code does not train a model and does not use sleep stages as respiratory lab
 For each frequency pair, the code:
 
 1. reads I and Q from EDF and validates all 16 channels and their per-channel sampling rates;
-2. low-pass filters I/Q at 0.8 Hz to suppress out-of-band noise;
+2. low-pass filters I/Q at 0.6 Hz to suppress out-of-band noise;
 3. estimates slowly varying I/Q centers in 5-minute blocks with an axis-scaled algebraic circle fit, rejects degenerate near-line fits, falls back to block medians where needed, and interpolates accepted centers over time;
 4. robustly scales I and Q, then selects the locally stronger direct I or Q component in overlapping 120-second windows using respiratory-band ratio, overlap continuity, spectral concentration, and respiratory variability;
 5. sign-aligns and overlap-adds the selected direct component, then marks low-radius intervals, component jumps, derivative-energy motion, clipping/rail samples, and long stuck-value runs;
