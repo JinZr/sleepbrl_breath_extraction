@@ -134,10 +134,7 @@ def process_edf(
             cfg,
             expand_initial=False,
         )
-        # Refilter after removing filter-visible transients. This second pass
-        # suppresses long zero-phase ringing around abrupt phase/carrier changes.
-        final_filtered = signal.sosfiltfilt(final_sos, repaired_filtered)
-        breath = _normalize_final(final_filtered)
+        breath = _normalize_final(repaired_filtered)
         artifact_mask = np.asarray(artifact_mask, dtype=bool)
         valid_mask = ~artifact_mask
         rate = estimate_minute_respiratory_rate(

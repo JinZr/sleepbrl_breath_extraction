@@ -86,7 +86,6 @@ def test_recovers_known_synthetic_breathing_frequency() -> None:
     x, artifact_mask, _ = repair_fused_waveform(
         x, artifact_mask, 4.0, config, expand_initial=False
     )
-    x = signal.sosfiltfilt(sos, x)
     x = ((x - np.mean(x)) / np.std(x)).astype(np.float32)
     rates = estimate_minute_respiratory_rate(x, artifact_mask, 4.0)
     valid = rates.rate_bpm[rates.valid]
