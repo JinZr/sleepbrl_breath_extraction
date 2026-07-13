@@ -42,6 +42,8 @@ Process a directory:
 ```bash
 python -m radar_to_breath \
   --input-dir /path/to/sleepbrl/1.0.0 \
+  --subjects-xlsx /path/to/sleepbrl/1.0.0/subjects.xlsx \
+  --split test \
   --output-dir /path/to/output \
   --diagnostics
 ```
@@ -51,17 +53,20 @@ Process one EDF:
 ```bash
 python -m radar_to_breath \
   --edf /path/to/sbj01.edf \
+  --subjects-xlsx /path/to/subjects.xlsx \
+  --split test \
   --output-dir /path/to/output \
   --overwrite
 ```
 
-An optional configuration file can be passed with `--config default_config.json`. Progress is printed and written to `run.log`. The command also writes `run_summary.csv`, `run_summary.json`, and `failures.json`; exceptions are recorded with tracebacks and are not silently discarded.
+An optional configuration file can be passed with `--config default_config.json`. Progress is printed and written to `run.log`. The command also writes `run_summary.csv`, `run_summary.json`, and `failures.json`; exceptions are recorded with tracebacks and are not silently discarded. After every selected EDF succeeds, it writes `index.csv` with canonical SleepBRL dataset/source, subject/session, integer duration, age, numeric sex (`F=0`, `M=1`), `breath_mask`/`stage_mask`, and the explicitly requested split.
 
 ## NPZ fields
 
 The field directly usable as the downstream breath channel is:
 
 - `breath`: 4 Hz, one-dimensional, zero-mean/unit-variance `float32`, finite.
+- `stage5`: one `int64` value per 30-second epoch, mapped as `W=0`, `1=1`, `2=2`, `3=3`, and `R=4`.
 
 Important accompanying fields include:
 

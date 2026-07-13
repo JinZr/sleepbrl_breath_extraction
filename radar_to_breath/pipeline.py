@@ -9,7 +9,7 @@ import tempfile
 import numpy as np
 from scipy import signal
 
-from .annotations import read_wfdb_sleep_stages
+from .annotations import SleepStageAnnotations, read_wfdb_sleep_stages, to_stage5_epochs
 from .config import ProcessingConfig
 from .diagnostics import choose_diagnostic_start, create_diagnostic_plot
 from .edf_io import EdfMetadata, open_sleepbrl_edf, read_iq_pair
@@ -28,17 +28,16 @@ from .validation import (
 LOGGER = logging.getLogger(__name__)
 
 
-def _annotation_summary(edf_path: Path, metadata: EdfMetadata) -> dict[str, object]:
-    annotation_path = Path(str(edf_path) + ".atr")
-    if not annotation_path.is_file():
-        return {"present": False}
-    annotations = read_wfdb_sleep_stages(annotation_path)
+def _annotation_summary(
+    annotation_path: Path,
+    annotations: SleepStageAnnotations,
+    metadata: EdfMetadata,
+) -> dict[str, object]:
     steps = np.unique(np.diff(annotations.samples)) if annotations.samples.size > 1 else np.asarray([])
     coverage_sec = 0.0
     if annotations.samples.size:
         coverage_sec = (float(annotations.samples[-1]) + 30.0 * metadata.source_fs) / metadata.source_fs
     return {
-        "present": True,
         "path": annotation_path.name,
         "count": int(annotations.samples.size),
         "labels": annotations.counts,
@@ -84,15 +83,19 @@ def process_edf(
         raise FileExistsError(f"output exists; use --overwrite: {output_path}")
 
     raw, metadata = open_sleepbrl_edf(edf_path)
-    LOGGER.info(
-        "%s: %d samples, %.1f Hz, %.1f seconds",
-        metadata.record_id,
-        metadata.n_samples,
-        metadata.source_fs,
-        metadata.duration_sec,
-    )
-    pair_results: list[PairResult] = []
     try:
+        annotation_path = Path(str(edf_path) + ".atr")
+        annotations = read_wfdb_sleep_stages(annotation_path)
+        stage5 = to_stage5_epochs(annotations, metadata.source_fs, metadata.n_samples)
+        annotation_summary = _annotation_summary(annotation_path, annotations, metadata)
+        LOGGER.info(
+            "%s: %d samples, %.1f Hz, %.1f seconds",
+            metadata.record_id,
+            metadata.n_samples,
+            metadata.source_fs,
+            metadata.duration_sec,
+        )
+        pair_results: list[PairResult] = []
         for pair_index in range(8):
             LOGGER.info("%s: processing I/Q pair %d/8", metadata.record_id, pair_index + 1)
             i_signal, q_signal = read_iq_pair(raw, pair_index)
@@ -143,7 +146,17 @@ def process_edf(
         contract = validate_breath_contract(
             breath, cfg.target_fs, metadata.duration_sec
         )
-        annotation_summary = _annotation_summary(edf_path, metadata)
+        expected_duration_sec = 30 * stage5.size
+        if metadata.duration_sec != expected_duration_sec:
+            raise ValueError(
+                f"EDF duration {metadata.duration_sec} does not match "
+                f"{stage5.size} stage epochs ({expected_duration_sec} seconds)"
+            )
+        if breath.size != 120 * stage5.size:
+            raise ValueError(
+                f"breath has {breath.size} samples but {stage5.size} stage epochs "
+                f"require {120 * stage5.size} samples at 4 Hz"
+            )
 
         pair_artifact_fraction = np.asarray(
             [item.artifact_fraction for item in pair_results], dtype=np.float32
@@ -166,6 +179,7 @@ def process_edf(
 
         payload = {
             "breath": breath,
+            "stage5": stage5,
             "fs": np.asarray(cfg.target_fs, dtype=np.float32),
             "source_record": np.asarray(metadata.record_id),
             "source_edf": np.asarray(edf_path.name),
@@ -262,6 +276,7 @@ def process_edf(
             "diagnostic_png": diagnostic_path,
             "source_fs": metadata.source_fs,
             "duration_sec": metadata.duration_sec,
+            "stage_epochs": int(stage5.size),
             "duration_hours": metadata.duration_sec / 3600.0,
             "output_samples": int(breath.size),
             "top_iq_pair": top_pair,
