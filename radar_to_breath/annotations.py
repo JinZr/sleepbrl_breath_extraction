@@ -18,6 +18,37 @@ class SleepStageAnnotations:
         return dict(sorted(Counter(self.labels).items()))
 
 
+STAGE5_LABELS = {"W": 0, "1": 1, "2": 2, "3": 3, "R": 4}
+
+
+def to_stage5_epochs(
+    annotations: SleepStageAnnotations,
+    source_fs: float,
+    source_n_samples: int,
+) -> NDArray[np.int64]:
+    epoch_samples_float = 30.0 * source_fs
+    epoch_samples = int(round(epoch_samples_float))
+    if not np.isclose(epoch_samples_float, epoch_samples):
+        raise ValueError(f"30-second epochs are not integral at source sampling rate {source_fs}")
+    if source_n_samples % epoch_samples:
+        raise ValueError(
+            f"EDF duration is not an integer number of 30-second epochs: "
+            f"{source_n_samples} samples at {source_fs} Hz"
+        )
+
+    expected_samples = np.arange(source_n_samples // epoch_samples, dtype=np.int64) * epoch_samples
+    if not np.array_equal(annotations.samples, expected_samples):
+        raise ValueError(
+            "sleep-stage annotations must start at sample 0, occur every 30 seconds, "
+            "and cover the full EDF duration"
+        )
+
+    unknown = sorted(set(annotations.labels) - STAGE5_LABELS.keys())
+    if unknown:
+        raise ValueError(f"unsupported sleep-stage labels: {unknown}")
+    return np.asarray([STAGE5_LABELS[label] for label in annotations.labels], dtype=np.int64)
+
+
 def read_wfdb_sleep_stages(path: str | Path) -> SleepStageAnnotations:
     """Read the small WFDB annotation subset used by SleepBRL.
 

@@ -13,12 +13,12 @@ The code does not train a model and does not use sleep stages as respiratory lab
 For each frequency pair, the code:
 
 1. reads I and Q from EDF and validates all 16 channels and their per-channel sampling rates;
-2. low-pass filters I/Q at 0.8 Hz to suppress out-of-band noise;
+2. low-pass filters I/Q at 0.6 Hz to suppress out-of-band noise;
 3. estimates slowly varying I/Q centers in 5-minute blocks with an axis-scaled algebraic circle fit, rejects degenerate near-line fits, falls back to block medians where needed, and interpolates accepted centers over time;
-4. robustly scales I and Q, forms `z = I + jQ`, and computes `unwrap(angle(z))`;
-5. marks low-radius intervals, phase jumps, derivative-energy motion, clipping/rail samples, and long stuck-value runs;
-6. stitches phase across artifact intervals, applies a zero-phase third-order Bessel 0.1-0.35 Hz band-pass, and resamples to 4 Hz;
-7. scores all eight candidates in overlapping 120-second windows using respiratory-band energy ratio, continuity, spectral concentration, I/Q balance, amplitude stability, and cross-frequency agreement;
+4. robustly scales I and Q, then selects the locally stronger direct I or Q component in overlapping 120-second windows using respiratory-band ratio, overlap continuity, spectral concentration, and respiratory variability;
+5. sign-aligns and overlap-adds the selected direct component, then marks low-radius intervals, component jumps, derivative-energy motion, clipping/rail samples, and long stuck-value runs;
+6. stitches the component across artifact intervals, applies a zero-phase third-order Bessel 0.1-0.35 Hz band-pass, and resamples to 4 Hz;
+7. scores all eight direct candidates in overlapping 120-second windows using respiratory-band energy ratio, continuity, spectral concentration, I/Q balance, amplitude stability, and cross-frequency agreement;
 8. sign-aligns and quality-weights at most three candidates per window, then overlap-adds the fused signal;
 9. detects gross post-fusion amplitude/envelope/derivative transients, interpolates through every marked interval while retaining an explicit mask, and repeats this check after the first final filter to suppress zero-phase ringing;
 10. applies the final 0.1-0.35 Hz zero-phase third-order Bessel filter and performs whole-record zero-mean/unit-variance normalization.
@@ -42,6 +42,8 @@ Process a directory:
 ```bash
 python -m radar_to_breath \
   --input-dir /path/to/sleepbrl/1.0.0 \
+  --subjects-xlsx /path/to/sleepbrl/1.0.0/subjects.xlsx \
+  --split test \
   --output-dir /path/to/output \
   --diagnostics
 ```
@@ -51,17 +53,20 @@ Process one EDF:
 ```bash
 python -m radar_to_breath \
   --edf /path/to/sbj01.edf \
+  --subjects-xlsx /path/to/subjects.xlsx \
+  --split test \
   --output-dir /path/to/output \
   --overwrite
 ```
 
-An optional configuration file can be passed with `--config default_config.json`. Progress is printed and written to `run.log`. The command also writes `run_summary.csv`, `run_summary.json`, and `failures.json`; exceptions are recorded with tracebacks and are not silently discarded.
+An optional configuration file can be passed with `--config default_config.json`. Progress is printed and written to `run.log`. The command also writes `run_summary.csv`, `run_summary.json`, and `failures.json`; exceptions are recorded with tracebacks and are not silently discarded. After every selected EDF succeeds, it writes `index.csv` with canonical SleepBRL dataset/source, subject/session, integer duration, age, numeric sex (`F=0`, `M=1`), `breath_mask`/`stage_mask`, and the explicitly requested split.
 
 ## NPZ fields
 
 The field directly usable as the downstream breath channel is:
 
 - `breath`: 4 Hz, one-dimensional, zero-mean/unit-variance `float32`, finite.
+- `stage5`: one `int64` value per 30-second epoch, mapped as `W=0`, `1=1`, `2=2`, `3=3`, and `R=4`.
 
 Important accompanying fields include:
 
@@ -96,4 +101,4 @@ The synthetic test generates quadrature I/Q signals with a known 0.25 Hz respira
 
 ## Limitations
 
-Multipath, I/Q imbalance, a changing radar-subject geometry, large body movement, and phase-center changes can all distort arctangent demodulation. A narrow I/Q arc can also make circle-center estimation ill-conditioned. Windowed multi-frequency fusion reduces reliance on a single carrier but does not create physiological ground truth. Artifact-filled samples remain continuous for downstream tensor compatibility and are identified by `artifact_mask`; analyses should use the mask. The global sign of the normalized waveform is arbitrary because radar phase polarity depends on geometry and sign alignment. Processing reads one full I/Q pair at a time rather than loading all 16 channels simultaneously; full-record zero-phase filtering still requires substantial RAM for an overnight record.
+Multipath, I/Q imbalance, a changing radar-subject geometry, large body movement, and phase-center changes can distort either direct component. A narrow I/Q arc can also make circle-center estimation ill-conditioned. Windowed component selection and multi-frequency fusion reduce reliance on one quadrature or carrier but do not create physiological ground truth. Artifact-filled samples remain continuous for downstream tensor compatibility and are identified by `artifact_mask`; analyses should use the mask. The global sign of the normalized waveform is arbitrary because radar polarity depends on geometry and sign alignment. Processing reads one full I/Q pair at a time rather than loading all 16 channels simultaneously; full-record zero-phase filtering still requires substantial RAM for an overnight record.

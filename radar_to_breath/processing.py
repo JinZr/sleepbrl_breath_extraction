@@ -249,6 +249,81 @@ def _downsample_mask(
     return conservative[indices]
 
 
+def _select_direct_iq_component(
+    i_norm: NDArray[np.float64],
+    q_norm: NDArray[np.float64],
+    fs: float,
+    config: ProcessingConfig,
+) -> NDArray[np.float64]:
+    components = np.stack((i_norm, q_norm))
+    resp_sos = signal.bessel(
+        3,
+        [config.respiration_low_hz, config.respiration_high_hz],
+        btype="bandpass",
+        fs=fs,
+        output="sos",
+        norm="phase",
+    )
+    broad_sos = signal.butter(
+        4,
+        [config.broad_low_hz, config.broad_high_hz],
+        btype="bandpass",
+        fs=fs,
+        output="sos",
+    )
+    respiratory = np.stack([_safe_sosfiltfilt(resp_sos, x) for x in components])
+    broad = np.stack([_safe_sosfiltfilt(broad_sos, x) for x in components])
+
+    n = i_norm.size
+    win = max(8, int(round(config.fusion_window_sec * fs)))
+    hop = max(1, int(round(config.fusion_hop_sec * fs)))
+    starts = list(range(0, max(1, n - 1), hop))
+    if not starts or starts[-1] + win < n:
+        starts.append(max(0, n - win))
+    starts = sorted(set(starts))
+
+    accumulator = np.zeros(n, dtype=np.float64)
+    respiratory_accumulator = np.zeros(n, dtype=np.float64)
+    taper_accumulator = np.zeros(n, dtype=np.float64)
+    for start in starts:
+        stop = min(n, start + win)
+        length = stop - start
+        existing = taper_accumulator[start:stop] > 0
+        respiratory_window = respiratory[:, start:stop]
+        scores, _, _ = _window_feature_scores(
+            respiratory_window,
+            broad[:, start:stop],
+            np.ones_like(respiratory_window),
+            np.zeros_like(respiratory_window, dtype=bool),
+            np.ones(2, dtype=np.float64),
+            fs,
+        )
+        signs = np.ones(2, dtype=np.int8)
+        if existing.sum() >= max(8, int(round(10 * fs))):
+            previous = (
+                respiratory_accumulator[start:stop][existing]
+                / taper_accumulator[start:stop][existing]
+            )
+            for component in range(2):
+                current = respiratory_window[component, existing]
+                if np.std(previous) > _EPS and np.std(current) > _EPS:
+                    overlap_corr = float(np.corrcoef(previous, current)[0, 1])
+                    if np.isfinite(overlap_corr):
+                        scores[component] *= 0.8 + 0.2 * abs(overlap_corr)
+                        if overlap_corr < 0:
+                            signs[component] = -1
+        selected = int(np.argmax(scores))
+        sign_value = int(signs[selected])
+        taper = np.maximum(signal.windows.tukey(length, alpha=0.5), 0.05)
+        accumulator[start:stop] += taper * sign_value * components[selected, start:stop]
+        respiratory_accumulator[start:stop] += taper * sign_value * respiratory[selected, start:stop]
+        taper_accumulator[start:stop] += taper
+
+    if np.any(taper_accumulator <= 0):
+        raise RuntimeError("direct I/Q overlap-add left uncovered samples")
+    return accumulator / taper_accumulator
+
+
 def process_iq_pair(
     i_signal: NDArray[np.float64],
     q_signal: NDArray[np.float64],
@@ -262,7 +337,7 @@ def process_iq_pair(
     lsb_q: float,
     config: ProcessingConfig,
 ) -> PairResult:
-    """Convert one I/Q pair into a respiratory-band phase candidate."""
+    """Convert one I/Q pair into a direct respiratory-band candidate."""
 
     if i_signal.shape != q_signal.shape or i_signal.ndim != 1:
         raise ValueError("I and Q must be same-length one-dimensional arrays")
@@ -296,7 +371,7 @@ def process_iq_pair(
     i_norm = i_centered / scale_i
     q_norm = q_centered / scale_q
     radius = np.hypot(i_norm, q_norm)
-    phase = np.unwrap(np.arctan2(q_norm, i_norm)).astype(np.float64)
+    phase = _select_direct_iq_component(i_norm, q_norm, fs, config)
 
     dphase = np.diff(phase, prepend=phase[0])
     dphase_med = float(np.median(dphase))
@@ -593,6 +668,14 @@ def fuse_pair_candidates(
     balances = np.asarray([item.iq_balance for item in pair_results], dtype=np.float64)
     n_pairs, n = candidates.shape
     fs = config.target_fs
+    whole_record_standardized = np.zeros_like(candidates)
+    for pair in range(n_pairs):
+        valid = ~artifacts[pair] & np.isfinite(candidates[pair])
+        if valid.sum() < max(8, int(round(10 * fs))):
+            continue
+        x = candidates[pair]
+        med = float(np.median(x[valid]))
+        whole_record_standardized[pair] = (x - med) / _robust_scale(x[valid])
     win = max(8, int(round(config.fusion_window_sec * fs)))
     hop = max(1, int(round(config.fusion_hop_sec * fs)))
     starts = list(range(0, max(1, n - 1), hop))
@@ -602,6 +685,8 @@ def fuse_pair_candidates(
 
     accumulator = np.zeros(n, dtype=np.float64)
     taper_accumulator = np.zeros(n, dtype=np.float64)
+    alignment_accumulator = np.zeros(n, dtype=np.float64)
+    alignment_taper_accumulator = np.zeros(n, dtype=np.float64)
     validity_accumulator = np.zeros(n, dtype=np.float64)
     all_weights = np.zeros((len(starts), n_pairs), dtype=np.float32)
     all_signs = np.ones((len(starts), n_pairs), dtype=np.int8)
@@ -614,7 +699,7 @@ def fuse_pair_candidates(
         brd = broad[:, start:stop]
         rad = radius[:, start:stop]
         art = artifacts[:, start:stop]
-        scores, corr, standardized = _window_feature_scores(
+        scores, corr, local_standardized = _window_feature_scores(
             cand, brd, rad, art, balances, fs
         )
         all_scores[wi] = scores.astype(np.float32)
@@ -642,35 +727,50 @@ def fuse_pair_candidates(
         all_weights[wi, chosen] = weights.astype(np.float32)
         all_signs[wi] = signs
 
+        synthesis_candidates = whole_record_standardized[:, start:stop]
         numerator = np.zeros(length, dtype=np.float64)
+        alignment_numerator = np.zeros(length, dtype=np.float64)
         denominator = np.zeros(length, dtype=np.float64)
         for weight, pair in zip(weights, chosen, strict=True):
             valid = ~art[pair]
             numerator[valid] += (
-                float(weight) * int(signs[pair]) * standardized[pair, valid]
+                float(weight) * int(signs[pair]) * synthesis_candidates[pair, valid]
+            )
+            alignment_numerator[valid] += (
+                float(weight) * int(signs[pair]) * local_standardized[pair, valid]
             )
             denominator[valid] += float(weight)
         fused = np.zeros(length, dtype=np.float64)
+        alignment_fused = np.zeros(length, dtype=np.float64)
         usable = denominator > 0
         fused[usable] = numerator[usable] / denominator[usable]
+        alignment_fused[usable] = alignment_numerator[usable] / denominator[usable]
         if not usable.all():
-            fallback = int(signs[reference]) * standardized[reference]
+            fallback = int(signs[reference]) * synthesis_candidates[reference]
             fused[~usable] = fallback[~usable]
+            alignment_fallback = int(signs[reference]) * local_standardized[reference]
+            alignment_fused[~usable] = alignment_fallback[~usable]
 
-        existing = taper_accumulator[start:stop] > 0
+        existing = alignment_taper_accumulator[start:stop] > 0
         if existing.sum() >= max(8, int(round(10 * fs))):
-            previous = accumulator[start:stop][existing] / taper_accumulator[start:stop][existing]
-            current = fused[existing]
+            previous = (
+                alignment_accumulator[start:stop][existing]
+                / alignment_taper_accumulator[start:stop][existing]
+            )
+            current = alignment_fused[existing]
             if np.std(previous) > _EPS and np.std(current) > _EPS:
                 overlap_corr = float(np.corrcoef(previous, current)[0, 1])
                 if np.isfinite(overlap_corr) and overlap_corr < 0:
                     fused *= -1
+                    alignment_fused *= -1
                     all_signs[wi, chosen] *= -1
 
         taper = signal.windows.tukey(length, alpha=0.5)
         taper = np.maximum(taper, 0.05)
         accumulator[start:stop] += taper * fused
         taper_accumulator[start:stop] += taper
+        alignment_accumulator[start:stop] += taper * alignment_fused
+        alignment_taper_accumulator[start:stop] += taper
         validity_accumulator[start:stop] += taper * denominator
 
     if np.any(taper_accumulator <= 0):
